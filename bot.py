@@ -1,7 +1,8 @@
 import requests
 import logging
+import time
+import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import json
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -18,143 +19,149 @@ def send_message(chat_id, text):
         if len(text) > 4096:
             for i in range(0, len(text), 4096):
                 payload = {"chat_id": chat_id, "text": text[i:i+4096]}
-                requests.post(url, json=payload, timeout=10)
+                requests.post(url, json=payload, timeout=30)
         else:
             payload = {"chat_id": chat_id, "text": text}
-            requests.post(url, json=payload, timeout=10)
+            requests.post(url, json=payload, timeout=30)
         logger.info(f"✅ Сообщение отправлено в {chat_id}")
         return True
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {str(e)}")
         return False
 
-class WebhookHandler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        """Обработка POST запросов (webhook)"""
-        if self.path == '/webhook':
-            try:
-                content_length = int(self.headers['Content-Length'])
-                post_data = self.rfile.read(content_length)
-                data = json.loads(post_data.decode('utf-8'))
+def process_update(update):
+    """Обработка одного обновления от Telegram"""
+    try:
+        msg = update.get('message', {})
+        if not msg:
+            return
+        
+        chat_id = msg.get('chat', {}).get('id')
+        user_id = msg.get('from', {}).get('id')
+        text = msg.get('text', '')
+        
+        if not chat_id or not text:
+            return
+        
+        logger.info(f"📩 Получено от {user_id}: {text[:50]}")
+        
+        # Обработка команд
+        if text == '/start':
+            send_message(chat_id, 
+                "🤖 Привет! Я Qwen3.5 9B бот.\n"
+                "Задайте любой вопрос!\n"
+                "/clear - очистить историю\n"
+                "/help - помощь"
+            )
+            return
+        
+        if text == '/help':
+            send_message(chat_id,
+                "📝 Просто напишите сообщение.\n"
+                "/clear - очистить историю\n"
+                "/start - начать сначала"
+            )
+            return
+        
+        if text == '/clear':
+            user_conversations[user_id] = []
+            send_message(chat_id, "🧹 История очищена!")
+            return
+        
+        # Обычное сообщение
+        if user_id not in user_conversations:
+            user_conversations[user_id] = []
+        
+        user_conversations[user_id].append({"role": "user", "content": text})
+        
+        # Запрос к модели
+        try:
+            payload = {
+                "model": "Qwen3.5-9B",
+                "messages": user_conversations[user_id][-5:],
+                "temperature": 0.7,
+                "max_tokens": 200
+            }
+            
+            response = requests.post(API_URL, json=payload, timeout=180)
+            
+            if response.status_code == 200:
+                result = response.json()
+                if "choices" in result and len(result["choices"]) > 0:
+                    reply = result["choices"][0]["message"]["content"]
+                    user_conversations[user_id].append({"role": "assistant", "content": reply})
+                    send_message(chat_id, reply)
+                else:
+                    send_message(chat_id, "❌ Не удалось получить ответ от модели")
+            else:
+                send_message(chat_id, f"❌ Ошибка API: {response.status_code}")
                 
-                msg = data.get('message', {})
-                if not msg:
-                    self.send_response(200)
-                    self.end_headers()
-                    self.wfile.write(b'{"status":"ok"}')
-                    return
-                
-                chat_id = msg.get('chat', {}).get('id')
-                user_id = msg.get('from', {}).get('id')
-                text = msg.get('text', '')
-                
-                if not chat_id or not text:
-                    self.send_response(200)
-                    self.end_headers()
-                    self.wfile.write(b'{"status":"ok"}')
-                    return
-                
-                logger.info(f"📩 Получено от {user_id}: {text[:50]}")
-                
-                # Обработка команд
-                if text == '/start':
-                    send_message(chat_id, 
-                        "🤖 Привет! Я Qwen3.5 9B бот.\n"
-                        "Задайте любой вопрос!\n"
-                        "/clear - очистить историю\n"
-                        "/help - помощь"
-                    )
-                    self.send_response(200)
-                    self.end_headers()
-                    self.wfile.write(b'{"status":"ok"}')
-                    return
-                
-                if text == '/help':
-                    send_message(chat_id,
-                        "📝 Просто напишите сообщение.\n"
-                        "/clear - очистить историю\n"
-                        "/start - начать сначала"
-                    )
-                    self.send_response(200)
-                    self.end_headers()
-                    self.wfile.write(b'{"status":"ok"}')
-                    return
-                
-                if text == '/clear':
-                    user_conversations[user_id] = []
-                    send_message(chat_id, "🧹 История очищена!")
-                    self.send_response(200)
-                    self.end_headers()
-                    self.wfile.write(b'{"status":"ok"}')
-                    return
-                
-                # Обычное сообщение
-                if user_id not in user_conversations:
-                    user_conversations[user_id] = []
-                
-                user_conversations[user_id].append({"role": "user", "content": text})
-                
-                # Запрос к модели
-                try:
-                    payload = {
-                        "model": "Qwen3.5-9B",
-                        "messages": user_conversations[user_id][-5:],
-                        "temperature": 0.7,
-                        "max_tokens": 200
-                    }
-                    
-                    response = requests.post(API_URL, json=payload, timeout=180)
-                    
-                    if response.status_code == 200:
-                        result = response.json()
-                        if "choices" in result and len(result["choices"]) > 0:
-                            reply = result["choices"][0]["message"]["content"]
-                            user_conversations[user_id].append({"role": "assistant", "content": reply})
-                            send_message(chat_id, reply)
-                        else:
-                            send_message(chat_id, "❌ Не удалось получить ответ от модели")
-                    else:
-                        send_message(chat_id, f"❌ Ошибка API: {response.status_code}")
-                        
-                except requests.exceptions.Timeout:
-                    send_message(chat_id, "⏰ Модель обрабатывает запрос слишком долго. Попробуйте упростить вопрос.")
-                except Exception as e:
-                    logger.error(f"❌ Ошибка: {str(e)}")
-                    send_message(chat_id, f"❌ Ошибка: {str(e)}")
-                
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(b'{"status":"ok"}')
-                
-            except Exception as e:
-                logger.error(f"❌ Webhook error: {str(e)}")
-                self.send_response(500)
-                self.end_headers()
-                self.wfile.write(f'{{"status":"error","message":"{str(e)}"}}'.encode('utf-8'))
-        else:
-            self.send_response(404)
-            self.end_headers()
+        except requests.exceptions.Timeout:
+            send_message(chat_id, "⏰ Модель обрабатывает запрос слишком долго. Попробуйте упростить вопрос.")
+        except Exception as e:
+            logger.error(f"❌ Ошибка: {str(e)}")
+            send_message(chat_id, f"❌ Ошибка: {str(e)}")
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка обработки: {str(e)}")
 
+def polling_loop():
+    """Основной цикл polling"""
+    offset = 0
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+            params = {"offset": offset, "timeout": 30}
+            response = requests.get(url, params=params, timeout=35)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('ok') and data.get('result'):
+                    for update in data['result']:
+                        process_update(update)
+                        offset = update['update_id'] + 1
+            else:
+                logger.error(f"Ошибка получения обновлений: {response.status_code}")
+                
+        except Exception as e:
+            logger.error(f"Ошибка в polling: {str(e)}")
+        
+        time.sleep(1)
+
+class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        """Обработка GET запросов (health check)"""
         if self.path == '/health' or self.path == '/':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            self.wfile.write(b'{"status":"ok","service":"telegram-bot"}')
+            self.wfile.write(b'{"status":"ok","service":"telegram-bot","mode":"polling"}')
         else:
             self.send_response(404)
             self.end_headers()
+    
+    def log_message(self, format, *args):
+        pass  # Отключаем логи для чистоты
 
-def run_server():
-    logger.info("🚀 Запуск HTTP сервера на порту 7860...")
+def run_health_server():
     server_address = ('0.0.0.0', 7860)
-    httpd = HTTPServer(server_address, WebhookHandler)
-    logger.info("✅ Сервер запущен. Ожидание webhook...")
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        logger.info("⏹️ Сервер остановлен")
+    httpd = HTTPServer(server_address, HealthHandler)
+    logger.info("🚀 Запуск health-сервера на порту 7860...")
+    httpd.serve_forever()
 
 if __name__ == "__main__":
-    run_server()
+    # Запускаем health-сервер в отдельном потоке
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
+    
+    # Удаляем старый webhook
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            logger.info("✅ Webhook удален")
+    except:
+        pass
+    
+    # Запускаем polling
+    logger.info("🔄 Запуск polling...")
+    polling_loop()
