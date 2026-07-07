@@ -2,6 +2,7 @@ import requests
 import logging
 import time
 import threading
+import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 logging.basicConfig(level=logging.INFO)
@@ -19,12 +20,19 @@ def send_message(chat_id, text):
         if len(text) > 4096:
             for i in range(0, len(text), 4096):
                 payload = {"chat_id": chat_id, "text": text[i:i+4096]}
-                requests.post(url, json=payload, timeout=30)
+                response = requests.post(url, json=payload, timeout=30)
+                logger.info(f"Ответ Telegram: {response.status_code}")
         else:
             payload = {"chat_id": chat_id, "text": text}
-            requests.post(url, json=payload, timeout=30)
-        logger.info(f"✅ Сообщение отправлено в {chat_id}")
-        return True
+            response = requests.post(url, json=payload, timeout=30)
+            logger.info(f"Ответ Telegram: {response.status_code} - {response.text[:100]}")
+        
+        if response.status_code == 200:
+            logger.info(f"✅ Сообщение отправлено в {chat_id}")
+            return True
+        else:
+            logger.error(f"❌ Ошибка отправки: {response.status_code} - {response.text}")
+            return False
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {str(e)}")
         return False
@@ -83,12 +91,17 @@ def process_update(update):
                 "max_tokens": 200
             }
             
+            logger.info(f"Отправка запроса к модели: {API_URL}")
             response = requests.post(API_URL, json=payload, timeout=180)
+            logger.info(f"Ответ от модели: {response.status_code}")
             
             if response.status_code == 200:
                 result = response.json()
+                logger.info(f"Результат: {str(result)[:200]}...")
+                
                 if "choices" in result and len(result["choices"]) > 0:
                     reply = result["choices"][0]["message"]["content"]
+                    logger.info(f"Ответ модели: {reply[:100]}...")
                     user_conversations[user_id].append({"role": "assistant", "content": reply})
                     send_message(chat_id, reply)
                 else:
@@ -140,12 +153,11 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.end_headers()
     
     def log_message(self, format, *args):
-        pass  # Отключаем логи для чистоты
+        pass
 
 def run_health_server():
     server_address = ('0.0.0.0', 7860)
     httpd = HTTPServer(server_address, HealthHandler)
-    logger.info("🚀 Запуск health-сервера на порту 7860...")
     httpd.serve_forever()
 
 if __name__ == "__main__":
@@ -153,14 +165,20 @@ if __name__ == "__main__":
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
     
+    # Проверяем доступность API
+    try:
+        response = requests.get("https://softltd-softltd-ai.hf.space/health", timeout=10)
+        logger.info(f"API Space доступен: {response.status_code}")
+    except Exception as e:
+        logger.error(f"API Space недоступен: {str(e)}")
+    
     # Удаляем старый webhook
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook"
         response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            logger.info("✅ Webhook удален")
-    except:
-        pass
+        logger.info(f"Webhook удален: {response.status_code}")
+    except Exception as e:
+        logger.error(f"Ошибка удаления webhook: {str(e)}")
     
     # Запускаем polling
     logger.info("🔄 Запуск polling...")
